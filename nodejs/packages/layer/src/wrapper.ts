@@ -53,6 +53,7 @@ import {
   HttpRequestCustomAttributeFunction,
   HttpResponseCustomAttributeFunction
 } from '@opentelemetry/instrumentation-http';
+import { Buffer } from 'buffer';
 
 import { LambdaTracerProvider } from './LambdaTracerProvider';
 
@@ -196,36 +197,112 @@ async function defaultConfigureInstrumentations() {
     const { HttpInstrumentation } = await import(
       '@opentelemetry/instrumentation-http'
     );
+
+    // --- Request Hook --- 
     const requestHook: HttpRequestCustomAttributeFunction = (span, request) => {
       if (request instanceof ClientRequest) {
-        const headers = request.getHeaders();
-        for (const headerName in headers) {
-          if (Object.prototype.hasOwnProperty.call(headers, headerName)) {
-            const headerValue = headers[headerName];
+        // Capture and consolidate headers
+        const reqHeaders: { [key: string]: string } = {};
+        const rawHeaders = request.getHeaders(); // Returns NodeJS.Dict<number | string | string[]>
+        for (const headerName in rawHeaders) {
+          if (Object.prototype.hasOwnProperty.call(rawHeaders, headerName)) {
+            const headerValue = rawHeaders[headerName];
             if (typeof headerValue === 'string') {
-              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, headerValue);
+              reqHeaders[headerName.toLowerCase()] = headerValue;
             } else if (Array.isArray(headerValue)) {
-              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, headerValue.join(','));
-            } else if (typeof headerValue === 'number' || typeof headerValue === 'boolean') {
-              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, String(headerValue));
+              // Join array values, simple comma separation
+              reqHeaders[headerName.toLowerCase()] = headerValue.join(',');
+            } else if (typeof headerValue === 'number') {
+              // Convert numbers to string
+              reqHeaders[headerName.toLowerCase()] = String(headerValue);
             }
+            // Undefined values are implicitly ignored
           }
         }
+        if (Object.keys(reqHeaders).length > 0) {
+          try {
+            span.setAttribute('http.request.headers', JSON.stringify(reqHeaders));
+          } catch (e) {
+            diag.warn('Failed to stringify request headers', e);
+          }
+        }
+
+        // **WARNING**: Capturing request bodies is complex and risky (performance, security).
+        // Requires handling write streams and potential double-reading issues.
+        // Generally NOT recommended in automatic instrumentation and NOT implemented here.
       }
     };
 
+    // --- Response Hook ---
     const responseHook: HttpResponseCustomAttributeFunction = (span, response) => {
       if (response instanceof IncomingMessage) {
-        const headers = response.headers;
-        for (const headerName in headers) {
-          if (Object.prototype.hasOwnProperty.call(headers, headerName)) {
-            const headerValue = headers[headerName];
-            if (typeof headerValue === 'string') {
-              span.setAttribute(`http.response.header.${headerName.toLowerCase()}`, headerValue);
-            } else if (Array.isArray(headerValue)) {
-              span.setAttribute(`http.response.header.${headerName.toLowerCase()}`, headerValue.join(','));
-            }
+        // Capture and consolidate headers
+        const resHeaders: { [key: string]: string | string[] | undefined } = {};
+        for (const headerName in response.headers) {
+          if (Object.prototype.hasOwnProperty.call(response.headers, headerName)) {
+            resHeaders[headerName.toLowerCase()] = response.headers[headerName];
           }
+        }
+        if (Object.keys(resHeaders).length > 0) {
+          try {
+            span.setAttribute('http.response.headers', JSON.stringify(resHeaders));
+          } catch (e) {
+            diag.warn('Failed to stringify response headers', e);
+          }
+        }
+
+        // Optional: Capture response body (Disabled by default)
+        const captureBody = process.env.OTEL_INSTRUMENTATION_HTTP_CAPTURE_RESPONSE_BODY?.toLowerCase() === 'true';
+        if (captureBody) {
+          const MAX_BODY_SIZE = parseInt(process.env.OTEL_INSTRUMENTATION_HTTP_CAPTURE_RESPONSE_BODY_MAX_SIZE || '1024', 10);
+          let body = '';
+          let currentSize = 0;
+          let truncated = false;
+          diag.debug(`Attempting to capture response body (max size: ${MAX_BODY_SIZE} bytes)`);
+
+          const dataListener = (chunk: Buffer | string) => {
+            if (truncated) return; // Stop processing if already truncated
+
+            const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            const chunkSize = chunkBuffer.length;
+
+            if (currentSize + chunkSize <= MAX_BODY_SIZE) {
+              body += chunkBuffer.toString('utf8'); // Append chunk
+              currentSize += chunkSize;
+            } else {
+              const remainingSize = MAX_BODY_SIZE - currentSize;
+              if (remainingSize > 0) {
+                body += chunkBuffer.toString('utf8', 0, remainingSize); // Append partial chunk
+              }
+              body += '... [truncated]';
+              currentSize = MAX_BODY_SIZE;
+              truncated = true;
+              diag.debug('Response body truncated due to size limit.');
+              // Detach listener once truncated to prevent further processing
+              response.removeListener('data', dataListener);
+            }
+          };
+
+          const endListener = () => {
+            if (body) { // Set attribute only if something was captured or truncated
+              span.setAttribute('http.response.body', body);
+              diag.debug(`Captured response body (truncated: ${truncated}, size: ${currentSize}).`);
+            }
+            // Clean up the other listener
+            response.removeListener('error', errorListener);
+          };
+
+          const errorListener = (err: Error) => {
+            diag.warn('Error capturing response body:', err);
+            span.setAttribute('http.response.body.capture_error', err.message || 'Unknown error');
+            // Clean up listeners
+            response.removeListener('data', dataListener);
+            response.removeListener('end', endListener);
+          };
+
+          response.on('data', dataListener);
+          response.on('end', endListener);
+          response.on('error', errorListener);
         }
       }
     };
