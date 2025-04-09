@@ -1,19 +1,20 @@
 name: "Continuous Build (Python)"
 
 on:
-  push:
-    paths:
-      - 'python/**'
-      - '.github/workflows/ci-python.yml'
-    branches:
-      - main
-  pull_request:
-    paths:
-      - 'python/**'
-      - '.github/workflows/ci-python.yml'
-    branches:
-      - main
-
+  # push:
+  #   paths:
+  #     - 'python/**'
+  #     - '.github/workflows/ci-python.yml'
+  #   branches:
+  #     - main
+  # pull_request:
+  #   paths:
+  #     - 'python/**'
+  #     - '.github/workflows/ci-python.yml'
+  #   branches:
+  #     - main
+  workflow_call:
+  
 env:
   AWS_REGION: us-east-1
   # Copied this CORE_REPO_SHA from
