@@ -66,4 +66,4 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Output Layer ARN
-        run: echo "Test output"
+        run: echo "Successfully published layer with ARN: ${{ steps.publish-layer.outputs.layer_arn }}"
