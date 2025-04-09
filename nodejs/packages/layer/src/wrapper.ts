@@ -44,6 +44,15 @@ import {
 } from '@opentelemetry/instrumentation-aws-lambda';
 import { AWSXRayPropagator } from '@opentelemetry/propagator-aws-xray';
 import { AWSXRayLambdaPropagator } from '@opentelemetry/propagator-aws-xray-lambda';
+import {
+  ClientRequest,
+  IncomingMessage
+} from 'http';
+import {
+  HttpInstrumentationConfig,
+  HttpRequestCustomAttributeFunction,
+  HttpResponseCustomAttributeFunction
+} from '@opentelemetry/instrumentation-http';
 
 import { LambdaTracerProvider } from './LambdaTracerProvider';
 
@@ -187,7 +196,46 @@ async function defaultConfigureInstrumentations() {
     const { HttpInstrumentation } = await import(
       '@opentelemetry/instrumentation-http'
     );
-    instrumentations.push(new HttpInstrumentation());
+    const requestHook: HttpRequestCustomAttributeFunction = (span, request) => {
+      if (request instanceof ClientRequest) {
+        const headers = request.getHeaders();
+        for (const headerName in headers) {
+          if (Object.prototype.hasOwnProperty.call(headers, headerName)) {
+            const headerValue = headers[headerName];
+            if (typeof headerValue === 'string') {
+              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, headerValue);
+            } else if (Array.isArray(headerValue)) {
+              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, headerValue.join(','));
+            } else if (typeof headerValue === 'number' || typeof headerValue === 'boolean') {
+              span.setAttribute(`http.request.header.${headerName.toLowerCase()}`, String(headerValue));
+            }
+          }
+        }
+      }
+    };
+
+    const responseHook: HttpResponseCustomAttributeFunction = (span, response) => {
+      if (response instanceof IncomingMessage) {
+        const headers = response.headers;
+        for (const headerName in headers) {
+          if (Object.prototype.hasOwnProperty.call(headers, headerName)) {
+            const headerValue = headers[headerName];
+            if (typeof headerValue === 'string') {
+              span.setAttribute(`http.response.header.${headerName.toLowerCase()}`, headerValue);
+            } else if (Array.isArray(headerValue)) {
+              span.setAttribute(`http.response.header.${headerName.toLowerCase()}`, headerValue.join(','));
+            }
+          }
+        }
+      }
+    };
+
+    const httpInstrumentationConfig: HttpInstrumentationConfig = {
+      requestHook: requestHook,
+      responseHook: responseHook,
+    };
+
+    instrumentations.push(new HttpInstrumentation(httpInstrumentationConfig));
   }
   if (activeInstrumentations.has('ioredis')) {
     const { IORedisInstrumentation } = await import(
@@ -526,7 +574,7 @@ export async function unwrap() {
 
   if (disableInstrumentations) {
     disableInstrumentations();
-    disableInstrumentations = () => {};
+    disableInstrumentations = () => { };
   }
   instrumentations = [];
 
@@ -536,12 +584,12 @@ export async function unwrap() {
 
   if (metricsDisableFunction) {
     metricsDisableFunction();
-    metricsDisableFunction = () => {};
+    metricsDisableFunction = () => { };
   }
 
   if (logsDisableFunction) {
     logsDisableFunction();
-    logsDisableFunction = () => {};
+    logsDisableFunction = () => { };
   }
 }
 
